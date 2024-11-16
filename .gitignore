@@ -1,0 +1,3 @@
+blockchain-backend/target/
+blockchain-backend/.env
+blockchain-backend/Cargo.lock

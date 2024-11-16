@@ -6,9 +6,63 @@ import base64
 import json
 from datetime import datetime
 import uuid
+import requests
+import os
+import dotenv
+from enum import Enum
 
-if 'documents' not in st.session_state:
-    st.session_state.documents = []
+dotenv.load_dotenv()
+
+def fetch_documents(api_url):
+    response = requests.get(api_url)
+    if response.status_code == 200:
+        return response.json()
+    else:
+        st.error("Failed to fetch documents from the API")
+        return []
+
+# Create a file with a user id if there is no file
+if not os.path.exists('user_id.txt'):
+    with open('user_id.txt', 'w') as f:
+        user_id = str(uuid.uuid4())
+        f.write(user_id)
+    response = requests.post(
+        "http://localhost:8080/accounts",
+        json={"id": user_id},
+        headers={'Content-Type': 'application/json'}
+    )
+# Read the user id from the file
+with open('user_id.txt', 'r') as f:
+    user_id = f.read()
+    if 'documents' not in st.session_state:
+        api_url = f"http://localhost:8080/accounts/{user_id}/nfts"  # Replace with your API URL
+        jsons = fetch_documents(api_url)
+        files = [metadata for json_ in jsons for metadata in json_['metadata']]
+        st.session_state.documents = jsons
+    else:
+        st.session_state.documents = []
+
+
+# Get backend link from environment variables
+BACKEND_LINK = os.getenv('BACKEND_LINK')
+if not BACKEND_LINK:
+    raise ValueError("BACKEND_LINK not found in environment variables")
+
+def create_document_payload(doc):
+    """Create a JSON payload with document information"""
+    # ... existing imports and code ...
+
+    payload = {
+        'document': {
+            'id': doc['id'],
+            'type': doc['document_type'],
+            'date_added': doc['date_added'],
+            'profile_type': doc['profile_type'],
+            'profile_info': st.session_state.profile_data[doc['profile_type']]
+        }
+    }
+    return json.dumps(payload)
+
 if 'profile_type' not in st.session_state:
     st.session_state.profile_type = 'Individual'
 if 'profile_data' not in st.session_state:
@@ -41,6 +95,20 @@ DOCUMENT_TYPES = {
     'pass': 'Access or membership pass'
 }
 
+class DocumentType(Enum):
+    Passport = 1,
+    IdCard = 2,
+    Pass = 3
+    
+    @staticmethod
+    def get_mapping(document_):
+        if document_ == 'passport':
+            return 1
+        elif document_ == 'id_card':
+            return 2
+        elif document_ == 'pass':
+            return 3
+
 def generate_qr_code(data):
     """Generate QR code from document data"""
     qr = qrcode.QRCode(version=1, box_size=10, border=5)
@@ -66,6 +134,36 @@ def save_document(document_type, uploaded_file):
             'profile_type': st.session_state.profile_type
         }
         
+        payload = {
+            "name": "Transferable NFT",
+            "description": "This NFT will be transferred",
+            "owner": user_id,
+            "metadata":{
+                'id': str(uuid.uuid4()),  # Generate UUID for document
+                'document_type': DocumentType.get_mapping(document_type),
+                'date_added': str(datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
+                'image': b64,
+                'profile_type': str(st.session_state.profile_type)   
+            }
+        }
+        
+        # print(payload)
+        try:
+            response = requests.post(
+                "http://localhost:8080/nfts",
+                json=payload,
+                headers={'Content-Type': 'application/json'}
+            )
+            
+            print(response)
+            
+            if not response.ok:
+                st.error("Failed to store document on blockchain")
+                return False
+                
+        except Exception as e:
+            st.error(f"Error connecting to blockchain backend: {str(e)}")
+            return False
         st.session_state.documents.append(document)
         return True
     return False
@@ -124,14 +222,110 @@ with st.sidebar:
         if submitted:
             if doc_file:
                 if save_document(doc_type, doc_file):
+                    
                     st.success(f"Document added successfully! (ID: {st.session_state.documents[-1]['id']})")
             else:
                 st.error("Please provide an image")
 
 # Main content area
-tab1, tab2, tab3 = st.tabs(["Profile", "Documents List", "Document Details"])
+tab2, tab3,tab1, = st.tabs(["Documents List", "Document Details","Profile"])
 
 # Profile Tab
+
+# Documents List Tab
+with tab2:
+    
+    # Filter documents based on profile type
+    filtered_documents = [doc for doc in st.session_state.documents]
+    filtered_documents = [doc['metadata'] for doc in filtered_documents]
+    print('*'*50)
+    print(filtered_documents)
+    print('*'*50)
+    st.header(f"{'Personal' if profile_type == 'Individual' else 'Business'} Documents")
+    
+    # Add sorting options
+    sort_col1, sort_col2 = st.columns([2, 1])
+    with sort_col1:
+        sort_by = st.selectbox(
+            "Sort by",
+            options=["Date (Newest First)", "Date (Oldest First)"],
+            key="sort_documents"
+        )
+    
+    # Sort documents based on selection
+    if sort_by == "Date (Newest First)":
+        filtered_documents.sort(key=lambda x: x['date_added'], reverse=True)
+    elif sort_by == "Date (Oldest First)":
+        filtered_documents.sort(key=lambda x: x['date_added'])
+    
+    # Display document count
+    st.write(f"Total documents: {len(filtered_documents)}")
+    
+    if not filtered_documents:
+        st.info(f"No {'personal' if profile_type == 'Individual' else 'business'} documents added yet. Use the sidebar to add new documents.")
+    else:
+        # Display documents in a grid layout
+        for i in range(0, len(filtered_documents), 2):
+            col1, col2 = st.columns(2)
+            
+            if i < len(filtered_documents):
+                doc = filtered_documents[i]
+                with col1:
+                    st.image(base64.b64decode(doc['image']), use_container_width=True)
+                    if doc['document_type'] == 1:
+                        doc_type = 'Passport'
+                    elif doc['document_type'] == 2:
+                        doc_type = 'ID Card'
+                    else:
+                        doc_type = 'Pass'
+                    st.write(f"**Type:** {doc_type}")
+                    st.write(f"**Added On:** {doc['date_added']}")
+            
+            if i + 1 < len(filtered_documents):
+                doc = filtered_documents[i + 1]
+                with col2:
+                    st.image(base64.b64decode(doc['image']), use_container_width=True)
+                    st.write(f"**Type:** {doc['document_type'].replace('_', ' ').title()}")
+                    st.write(f"**Added On:** {doc['date_added']}")
+
+# Document Details Tab
+with tab3:
+    
+    # Document selection dropdown
+    st.session_state.documents = [doc['metadata'] for doc in st.session_state.documents]
+    for doc in st.session_state.documents:
+        print(doc)
+        doc_type = doc['document_type']
+        if doc_type == 1:
+            doc['document_type'] = 'Passport'
+        elif doc_type == 2:
+            doc['document_type'] = 'ID Card'
+        else:
+            doc['document_type'] = 'Pass'
+    doc_options = {doc['id']: f"{doc['document_type']} (Added on {doc['date_added']})" for doc in st.session_state.documents}
+    
+    selected_doc_id = st.selectbox(
+        "Select a document to view details",
+        options=doc_options.keys(),
+        format_func=lambda x: doc_options[x]
+    )
+    
+    if selected_doc_id:
+        selected_doc = next((doc for doc in st.session_state.documents if doc['id'] == selected_doc_id), None)
+        if selected_doc:
+            st.image(base64.b64decode(selected_doc['image']), use_container_width=True)
+            st.write(f"**Document Type:** {selected_doc['document_type'].replace('_', ' ').title()}")
+            st.write(f"**Date Added:** {selected_doc['date_added']}")
+            
+            qr_code_data = json.dumps({
+                'document_id': selected_doc['id'],
+                'document_type': selected_doc['document_type'],
+                'date_added': selected_doc['date_added']
+            })
+            qr_code_img = generate_qr_code(qr_code_data)
+            st.image(qr_code_img, caption="QR Code", use_container_width=True)
+
+
 with tab1:
     st.header(f"{'Personal' if profile_type == 'Individual' else 'Business'} Profile")
     
@@ -214,77 +408,3 @@ with tab1:
                     }
                     if update_profile('Company', profile_data):
                         st.success("Company profile updated successfully!")
-
-# Documents List Tab
-with tab2:
-    
-    # Filter documents based on profile type
-    filtered_documents = [doc for doc in st.session_state.documents if doc['profile_type'] == profile_type]
-    
-    st.header(f"{'Personal' if profile_type == 'Individual' else 'Business'} Documents")
-    
-    # Add sorting options
-    sort_col1, sort_col2 = st.columns([2, 1])
-    with sort_col1:
-        sort_by = st.selectbox(
-            "Sort by",
-            options=["Date (Newest First)", "Date (Oldest First)"],
-            key="sort_documents"
-        )
-    
-    # Sort documents based on selection
-    if sort_by == "Date (Newest First)":
-        filtered_documents.sort(key=lambda x: x['date_added'], reverse=True)
-    elif sort_by == "Date (Oldest First)":
-        filtered_documents.sort(key=lambda x: x['date_added'])
-    
-    # Display document count
-    st.write(f"Total documents: {len(filtered_documents)}")
-    
-    if not filtered_documents:
-        st.info(f"No {'personal' if profile_type == 'Individual' else 'business'} documents added yet. Use the sidebar to add new documents.")
-    else:
-        # Display documents in a grid layout
-        for i in range(0, len(filtered_documents), 2):
-            col1, col2 = st.columns(2)
-            
-            if i < len(filtered_documents):
-                doc = filtered_documents[i]
-                with col1:
-                    st.image(base64.b64decode(doc['image']), use_container_width=True)
-                    st.write(f"**Type:** {doc['document_type'].replace('_', ' ').title()}")
-                    st.write(f"**Added On:** {doc['date_added']}")
-            
-            if i + 1 < len(filtered_documents):
-                doc = filtered_documents[i + 1]
-                with col2:
-                    st.image(base64.b64decode(doc['image']), use_container_width=True)
-                    st.write(f"**Type:** {doc['document_type'].replace('_', ' ').title()}")
-                    st.write(f"**Added On:** {doc['date_added']}")
-
-# Document Details Tab
-with tab3:
-    
-    # Document selection dropdown
-    doc_options = {doc['id']: f"{doc['document_type'].replace('_', ' ').title()} (Added on {doc['date_added']})" for doc in st.session_state.documents if doc['profile_type'] == profile_type}
-    
-    selected_doc_id = st.selectbox(
-        "Select a document to view details",
-        options=doc_options.keys(),
-        format_func=lambda x: doc_options[x]
-    )
-    
-    if selected_doc_id:
-        selected_doc = next((doc for doc in st.session_state.documents if doc['id'] == selected_doc_id), None)
-        if selected_doc:
-            st.image(base64.b64decode(selected_doc['image']), use_container_width=True)
-            st.write(f"**Document Type:** {selected_doc['document_type'].replace('_', ' ').title()}")
-            st.write(f"**Date Added:** {selected_doc['date_added']}")
-            
-            qr_code_data = json.dumps({
-                'document_id': selected_doc['id'],
-                'document_type': selected_doc['document_type'],
-                'date_added': selected_doc['date_added']
-            })
-            qr_code_img = generate_qr_code(qr_code_data)
-            st.image(qr_code_img, caption="QR Code", use_container_width=True)
